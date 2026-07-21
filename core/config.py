@@ -23,9 +23,6 @@ SANDBOX_MEMORY = "4g"
 # Ceiling on a single reply. Analyses that write a lot of code need headroom.
 MAX_OUTPUT_TOKENS = 16000
 
-# Safety net for the tool-call loop, in case a run never settles.
-MAX_TOOL_ITERATIONS = 30
-
 # Files API hard limit is far higher, but pandas in a small sandbox struggles
 # well before that, so warn early.
 FILE_SIZE_WARN_BYTES = 50 * 1024 * 1024
@@ -46,11 +43,29 @@ PRICE_PER_MTOK = {
 }
 DEFAULT_PRICE = {"input": 2.00, "output": 8.00}
 
+# The sandbox is billed per 20-minute session by memory tier, independent of
+# tokens. At 4g it is $0.12 a session, which on a short conversation costs more
+# than every token in it -- a cost meter counting only tokens reads low by
+# multiples, so the sidebar tracks this separately.
+SANDBOX_PRICE_PER_SESSION = {"1g": 0.03, "4g": 0.12, "16g": 0.48, "64g": 1.92}
+
 # Where downloaded artifacts are written when running the smoke test.
 OUTPUT_DIR = "outputs"
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Approximate USD cost of a turn, for display in the sidebar."""
+    """Approximate USD token cost of a turn, for display in the sidebar."""
     price = PRICE_PER_MTOK.get(model, DEFAULT_PRICE)
     return (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000
+
+
+def sandbox_session_cost(memory: str = SANDBOX_MEMORY) -> float:
+    """USD for one 20-minute sandbox session at the given memory tier.
+
+    Falls back to the configured tier's price rather than zero: a meter that
+    silently drops a charge it does not recognise is worse than one that is
+    approximately right.
+    """
+    return SANDBOX_PRICE_PER_SESSION.get(
+        memory, SANDBOX_PRICE_PER_SESSION.get(SANDBOX_MEMORY, 0.12)
+    )

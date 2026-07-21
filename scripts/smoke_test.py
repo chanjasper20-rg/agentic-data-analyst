@@ -123,8 +123,11 @@ def report(result, session, label: str) -> bool:
 
     print(
         f"\nTokens      : {result.input_tokens:,} in / {result.output_tokens:,} out"
-        f"  (about ${result.cost_usd:.4f})"
+        f"  (about ${result.token_cost_usd:.4f})"
     )
+    if result.sandbox_cost_usd:
+        print(f"Sandbox     : ${result.sandbox_cost_usd:.2f} for this session")
+    print(f"Turn cost   : about ${result.cost_usd:.4f}")
 
     problems = []
     if not text:

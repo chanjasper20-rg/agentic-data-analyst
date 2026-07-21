@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Unit tests for the pure helpers: .\.venv\Scripts\python.exe -m pytest
+pytest>=8.0
+</content>

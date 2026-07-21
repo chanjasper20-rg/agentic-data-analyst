@@ -39,11 +39,27 @@ class TurnResult:
     output_tokens: int = 0
     response_id: str | None = None
     container_restarted: bool = False
+    container_started: bool = False
+    model: str = config.MODEL
     error: str | None = None
 
     @property
+    def token_cost_usd(self) -> float:
+        return config.estimate_cost(self.model, self.input_tokens, self.output_tokens)
+
+    @property
+    def sandbox_cost_usd(self) -> float:
+        """The sandbox fee, charged on the turn that opened the container.
+
+        Billing is per 20-minute session rather than per turn, so attributing
+        the whole fee to the turn that started the container keeps the running
+        total right even though any single turn's figure is lumpy.
+        """
+        return config.sandbox_session_cost() if self.container_started else 0.0
+
+    @property
     def cost_usd(self) -> float:
-        return config.estimate_cost(config.MODEL, self.input_tokens, self.output_tokens)
+        return self.token_cost_usd + self.sandbox_cost_usd
 
 
 class AnalysisError(RuntimeError):
@@ -71,6 +87,33 @@ class AnalysisSession:
     def file_ids(self) -> list[str]:
         return [item.file_id for item in self.files]
 
+    def _mount_new_files(self) -> None:
+        """Mount files attached since the container was built.
+
+        A container's file list is fixed when it is created, so a file uploaded
+        part-way through a conversation is invisible to the sandbox no matter
+        how many times we pass it in the tool spec -- it has to be added to the
+        live container explicitly. Without this the model insists a file the
+        sidebar shows as uploaded does not exist.
+        """
+        if not self.container_id:
+            return  # a container being created mounts everything via file_ids
+
+        for file_id in self.file_ids:
+            if file_id in self._files_in_container:
+                continue
+            try:
+                self.client.containers.files.create(
+                    container_id=self.container_id, file_id=file_id
+                )
+            except openai.APIStatusError as exc:
+                if self._container_is_gone(exc):
+                    raise _ContainerGone from exc
+                raise
+            # Recorded per file, not in one batch at the end: a failure part-way
+            # through must not leave us re-mounting the ones that succeeded.
+            self._files_in_container.add(file_id)
+
     # ------------------------------------------------------------ the turn
 
     def ask(
@@ -84,15 +127,19 @@ class AnalysisSession:
         of "text" (a streamed delta), "code" (the model started running code),
         or "status". It lets the UI show progress; it is optional.
         """
+        # The retry sits inside the error-mapping try, not beside it: an
+        # exception raised from an `except` clause skips its sibling handlers,
+        # which would leak a raw SDK error from the second attempt.
         try:
-            return self._ask_once(question, on_event)
-        except _ContainerGone:
-            # Sandbox expired. Rebuild it, re-mount the files, try once more.
-            self.container_id = None
-            self._files_in_container.clear()
-            result = self._ask_once(question, on_event)
-            result.container_restarted = True
-            return result
+            try:
+                return self._ask_once(question, on_event)
+            except _ContainerGone:
+                # Sandbox expired. Rebuild it, re-mount the files, try once more.
+                self.container_id = None
+                self._files_in_container.clear()
+                result = self._ask_once(question, on_event)
+                result.container_restarted = True
+                return result
         except openai.RateLimitError as exc:
             raise AnalysisError(
                 "OpenAI is rate limiting this key right now. Wait a moment and ask again."
@@ -120,13 +167,18 @@ class AnalysisSession:
         if self.last_response_id:
             request["previous_response_id"] = self.last_response_id
 
+        had_container = self.container_id is not None
+
+        self._mount_new_files()
         response = self._create_with_container_check(request, on_event)
 
         self.last_response_id = getattr(response, "id", None)
         self._remember_container(response)
         self._files_in_container.update(self.file_ids)
 
-        return self._collect(response)
+        result = self._collect(response)
+        result.container_started = not had_container and self.container_id is not None
+        return result
 
     def _create_with_container_check(
         self,
@@ -138,11 +190,14 @@ class AnalysisSession:
                 return self.client.responses.create(**request)
             return self._create_streaming(request, on_event)
         except openai.APIStatusError as exc:
-            # OpenAI does not document which error a dead sandbox raises, so we
-            # match on the message across any 4xx rather than a specific class.
-            if self.container_id and _mentions_container(str(exc)):
+            if self._container_is_gone(exc):
                 raise _ContainerGone from exc
             raise
+
+    def _container_is_gone(self, exc: openai.APIStatusError) -> bool:
+        """OpenAI does not document which error a dead sandbox raises, so we
+        match on the message across any 4xx rather than a specific class."""
+        return bool(self.container_id) and _mentions_container(str(exc))
 
     def _create_streaming(self, request: dict[str, Any], on_event: Callable[[str, str], None]) -> Any:
         """Stream the reply so the UI can show text and code as they arrive."""
@@ -187,7 +242,7 @@ class AnalysisSession:
     # -------------------------------------------------------- reading output
 
     def _collect(self, response: Any) -> TurnResult:
-        result = TurnResult(response_id=getattr(response, "id", None))
+        result = TurnResult(response_id=getattr(response, "id", None), model=self.model)
 
         usage = getattr(response, "usage", None)
         if usage is not None:

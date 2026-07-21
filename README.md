@@ -23,9 +23,11 @@ starting from scratch.
 - **Real code execution** — pandas, numpy, scipy, scikit-learn, matplotlib in a sandbox
 - **Charts and reports** — PNGs render inline; Excel and PDF exports come back as downloads
 - **Conversational** — "now break that down by site" works, and reuses the loaded data
+- **Data can arrive mid-conversation** — upload another file at any point and the running
+  sandbox picks it up without restarting the analysis
 - **Self-correcting** — when its code raises, it reads the traceback and fixes it
 - **Transparent** — every cell of code it ran is one click away under each answer
-- **Cost aware** — a running spend estimate for the session sits in the sidebar
+- **Cost aware** — a running spend estimate sits in the sidebar, tokens and sandbox split out
 
 ## Architecture
 
@@ -55,6 +57,10 @@ Two pieces of server-side state carry the conversation:
 | `previous_response_id` | The model remembers the conversation without resending the transcript | Responses are retained 30 days |
 | `container_id` | The sandbox keeps its loaded dataframes and variables between turns | Expires after 20 min idle — the app silently rebuilds it, re-mounts the files, and retries once |
 
+A container's file list is fixed when it is created, so files uploaded later are mounted
+into the live container explicitly before the next question runs. Without that step a
+mid-conversation upload would be accepted by the UI and still be invisible to the model.
+
 ## Running it
 
 Requires Python 3.10+ and an [OpenAI API key](https://platform.openai.com/api-keys).
@@ -70,7 +76,24 @@ python scripts\make_sample_data.py
 streamlit run app.py
 ```
 
-Verify the API path end to end before touching the UI:
+`streamlit` resolves only while the venv is activated. In a fresh shell — or if you see
+`streamlit: The term 'streamlit' is not recognized` — call the venv interpreter directly
+instead, which works from anywhere:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+## Testing
+
+The pure helpers have unit tests that need no API key and cost nothing:
+
+```powershell
+pip install -r requirements-dev.txt
+pytest
+```
+
+Then verify the API path end to end before touching the UI:
 
 ```powershell
 python scripts\smoke_test.py --follow-up
@@ -79,7 +102,8 @@ python scripts\smoke_test.py --follow-up
 That uploads the sample dataset, asks a real question, confirms the model ran code and
 produced a chart, downloads it to `outputs/`, and checks that the second question
 reused the same sandbox. It fails with a specific reason rather than leaving you to
-debug through the browser.
+debug through the browser. Unlike `pytest`, it bills your account — about **$0.13** a
+run, nearly all of it the sandbox session fee rather than tokens.
 
 ## The sample dataset
 
@@ -108,8 +132,10 @@ core/session.py             The turn loop: container reuse, expiry recovery, par
 core/rendering.py           TurnResult -> Streamlit widgets
 scripts/make_sample_data.py Synthetic solar dataset with planted faults
 scripts/make_test_orders.py Second dataset, a different shape to test against
-scripts/smoke_test.py       UI-free end-to-end verification
+scripts/smoke_test.py       UI-free end-to-end verification (costs money)
+tests/test_pure.py          Unit tests for the pure helpers (free, no network)
 CLAUDE.md                   Working notes: gotchas, conventions, how to verify
+requirements-dev.txt        Runtime deps plus pytest
 .env.example                Template for your API key -- copy to .env
 ```
 
@@ -124,14 +150,22 @@ so this app will not run on it. `gpt-4.1` is the current GPT-4 generation and wo
 
 ## Cost
 
-At `gpt-4.1` ($2.00 in / $8.00 out per million tokens), a typical question costs roughly
-**$0.02–$0.10**; a heavy multi-chart report turn runs **$0.20–$0.50**. The sandbox bills
-per 20-minute session by memory tier — this app requests 4 GB at $0.12, since 1 GB gets
-tight once pandas copies a frame.
+Two things are billed, and on a short session the smaller-looking one dominates.
+
+**The sandbox** is charged per 20-minute session by memory tier, not per token. This app
+requests 4 GB at **$0.12**, since 1 GB gets tight once pandas copies a frame.
+
+**Tokens** at `gpt-4.1` are $2.00 in / $8.00 out per million, which works out at roughly
+**$0.01–$0.10** a question; a heavy multi-chart report turn runs **$0.20–$0.50**.
+
+So a two-question session costs about $0.14 — and $0.12 of that is the container. The
+sidebar meter counts both and shows the split, because a token-only figure reads low by
+multiples on exactly the short sessions most people run.
 
 Chained conversations re-bill earlier input tokens on every turn, so a long session
-costs more per question than a short one. **Start a new analysis** in the sidebar is the
-cost control as much as it is the reset button.
+costs more per question than a short one. **Start a new analysis** in the sidebar resets
+the conversation, but note it does not refund the container — the next question opens a
+new session and is charged the tier fee again.
 
 ## Deploying
 

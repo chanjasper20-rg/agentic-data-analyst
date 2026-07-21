@@ -38,6 +38,7 @@ def init_state() -> None:
         "known_uploads": set(),  # Streamlit file ids we have already sent
         "pending": None,        # question queued by a button click
         "spend": 0.0,
+        "sandbox_spend": 0.0,
         "tokens_in": 0,
         "tokens_out": 0,
         "api_key_override": "",
@@ -52,6 +53,7 @@ def reset_conversation() -> None:
     st.session_state.known_uploads = set()
     st.session_state.pending = None
     st.session_state.spend = 0.0
+    st.session_state.sandbox_spend = 0.0
     st.session_state.tokens_in = 0
     st.session_state.tokens_out = 0
     st.session_state.pop("setup_help", None)
@@ -101,8 +103,10 @@ def render_sidebar() -> None:
 
         if st.session_state.tokens_in or st.session_state.tokens_out:
             st.metric("Estimated spend", f"${st.session_state.spend:.3f}")
+            token_spend = st.session_state.spend - st.session_state.sandbox_spend
             st.caption(
-                f"{st.session_state.tokens_in:,} tokens in · "
+                f"${token_spend:.3f} tokens · ${st.session_state.sandbox_spend:.2f} sandbox\n\n"
+                f"{st.session_state.tokens_in:,} in · "
                 f"{st.session_state.tokens_out:,} out · model {config.MODEL}"
             )
         else:
@@ -122,8 +126,9 @@ def render_sidebar() -> None:
 
         st.divider()
         st.caption(
-            f"Sandbox: {config.SANDBOX_MEMORY} RAM, expires after 20 minutes idle. "
-            "Data is uploaded to OpenAI for analysis."
+            f"Sandbox: {config.SANDBOX_MEMORY} RAM at "
+            f"${config.sandbox_session_cost():.2f} per 20-minute session, billed when a "
+            "session starts. Data is uploaded to OpenAI for analysis."
         )
 
 
@@ -252,6 +257,7 @@ def record(result: TurnResult) -> None:
     st.session_state.tokens_in += result.input_tokens
     st.session_state.tokens_out += result.output_tokens
     st.session_state.spend += result.cost_usd
+    st.session_state.sandbox_spend += result.sandbox_cost_usd
 
 
 def main() -> None:

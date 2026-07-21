@@ -20,6 +20,19 @@ Windows, PowerShell, `.venv` in the project root. Use the venv interpreter expli
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
+A bare `streamlit run app.py` fails with "not recognized" unless the venv is activated in
+that shell — Streamlit is installed only inside `.venv`, never globally. The failure
+happens before any project code loads, so it looks like a broken app rather than a
+broken PATH. The explicit-interpreter form above always works; `.\.venv\Scripts\Activate.ps1`
+first is the alternative, per shell session.
+
+**Restart the app after editing anything under `core/`.** Streamlit's auto-reload
+re-runs `app.py` but keeps already-imported modules cached, so a new function in
+`core/config.py` is invisible to the running process and the page dies with
+`AttributeError: module 'core.config' has no attribute ...`. The code is fine; the
+process is stale. Nothing in the traceback says so, and re-reading the source will not
+help — kill the process and start it again.
+
 ## Verify against the API, not through the browser
 
 `scripts/smoke_test.py` runs the whole path — upload, ask, code execution, artifact
@@ -29,12 +42,27 @@ download — with no Streamlit involved, and fails with a specific reason.
 .\.venv\Scripts\python.exe scripts\smoke_test.py --follow-up
 ```
 
-Run it after any change to `core/session.py` or `core/files.py`. Debugging the API path
+Run it after any change to `core/session.py`, `core/files.py`, or `core/prompts.py` —
+the prompt is in that list because whether the model finishes its work is a prompt
+property, and this test is the only thing that checks it. Debugging the API path
 through the UI is slow and conflates two layers; this separates them. `--follow-up` also
 checks that the second question reused the same container, which is what makes
 conversational analysis work.
 
-Each run costs real money (a few cents). Don't loop it.
+Each run costs real money — about **$0.13**, of which $0.12 is the sandbox session fee
+and under two cents is tokens. Don't loop it.
+
+The pure helpers are covered by free unit tests — no key, no network — and those are the
+ones to reach for first:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
+```
+
+`tests/test_pure.py` pins `_mentions_container` and `strip_sandbox_links` in particular.
+Both fail *silently* if they regress — expiry recovery quietly stops happening, dead
+download links quietly come back — and the smoke test is too coarse to catch either.
 
 ## Things that will bite you
 
@@ -49,6 +77,25 @@ document a specific error class for a dead container, so `_mentions_container` m
 the message text across any 4xx — if expiry recovery ever breaks silently, suspect that
 matcher first.
 
+**A container's file list is fixed when it is created.** Passing `file_ids` in the tool
+spec only does anything on the turn that builds the container; after that the field is
+ignored, and a file uploaded mid-conversation stays invisible to the sandbox no matter
+how many turns pass. The sidebar shows it as uploaded, the Files API has it, and the
+model insists it does not exist. `AnalysisSession._mount_new_files` closes this by
+diffing `file_ids` against `_files_in_container` and calling
+`containers.files.create` for the difference. It records each file as mounted
+individually, so a failure part-way through does not re-mount what already succeeded.
+
+**The model will announce work and then stop.** Left to itself it replies "next, I'll
+aggregate and plot..." and ends the turn — you get a paragraph and no chart, and the
+smoke test fails on `no chart image was produced`. Nothing in `_ask_once` continues a
+response that quit early; there is one API call per question. What prevents it is
+prompt rules 1, 2 and 6 in `core/prompts.py`, which say that inspection is not a
+checkpoint, that error recovery happens inside the turn, and that a reply is the end of
+the task rather than a progress update. Rule 2 matters most on follow-ups, where the
+model hits a `KeyError`, narrates the fix, and hands back. If this regresses, suspect
+those three before anything in `session.py`.
+
 **Artifacts are discovered two ways, and neither is guaranteed.** A file reaches the UI
 only if it appears as a `code_interpreter_call` output file_id or as a
 `container_file_citation` annotation on the message. A file the model writes to
@@ -60,6 +107,15 @@ as `sandbox:/mnt/data/report.xlsx`. Streamlit renders that as a live anchor with
 yields a dead or empty file — users click it, conclude downloads are broken, and never
 find the real buttons below. `core/rendering.py` defuses these via `strip_sandbox_links()`
 before `st.markdown`. Keep that in place; it is load-bearing UX, not cosmetic.
+
+**The sandbox fee, not tokens, is most of a short session's cost.** The container is
+billed per 20-minute session by tier — $0.12 at 4g — while a typical turn is under a
+cent of tokens. A smoke test run bills about $0.13, of which $0.12 is the container. So
+`TurnResult.cost_usd` is `token_cost_usd + sandbox_cost_usd`, with the fee attributed to
+the turn where `container_started` is true (the first turn, and any expiry rebuild).
+That makes a single turn's figure lumpy but the session total right. Keep the two
+components separate in anything user-facing; a token-only meter reads low by multiples
+and that is what it used to do.
 
 **Prompt changes are behaviour changes.** `core/prompts.py` is the reason answers lead
 with the finding, charts get saved as PNGs at all, and exports become real files. Edit it
@@ -100,8 +156,9 @@ should stay stated — it is the main reason not to point this at anything confi
 | `core/files.py` | Files API upload, artifact download, filename safety |
 | `core/rendering.py` | `TurnResult` → Streamlit widgets |
 | `core/prompts.py` | Analyst persona and canned prompts |
-| `core/config.py` | Model, sandbox size, limits, pricing table |
+| `core/config.py` | Model, sandbox size, limits, token and sandbox pricing |
 | `core/openai_client.py` | Key resolution and client construction |
-| `scripts/smoke_test.py` | UI-free end-to-end verification |
+| `scripts/smoke_test.py` | UI-free end-to-end verification (costs money) |
+| `tests/test_pure.py` | Unit tests for the pure helpers (free, no network) |
 | `scripts/make_sample_data.py` | Solar dataset with four planted faults |
 | `scripts/make_test_orders.py` | Second dataset for testing a different shape |
