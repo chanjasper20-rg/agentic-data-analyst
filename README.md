@@ -106,8 +106,11 @@ core/prompts.py             The analyst persona and canned prompts
 core/files.py               Files API upload, artifact download, filename safety
 core/session.py             The turn loop: container reuse, expiry recovery, parsing
 core/rendering.py           TurnResult -> Streamlit widgets
-scripts/make_sample_data.py Synthetic dataset generator
+scripts/make_sample_data.py Synthetic solar dataset with planted faults
+scripts/make_test_orders.py Second dataset, a different shape to test against
 scripts/smoke_test.py       UI-free end-to-end verification
+CLAUDE.md                   Working notes: gotchas, conventions, how to verify
+.env.example                Template for your API key -- copy to .env
 ```
 
 ## Choosing a model
