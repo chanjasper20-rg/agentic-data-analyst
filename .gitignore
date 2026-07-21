@@ -7,3 +7,4 @@ outputs/
 .streamlit/secrets.toml
 .DS_Store
 .idea/
+.claude/settings.local.json
